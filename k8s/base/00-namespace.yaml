@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability
+    # Enforce the restricted Pod Security Standard. Elasticsearch needs
+    # sysctl tuning that this forbids, which is handled explicitly by an init
+    # container with a narrow, audited privilege escalation rather than by
+    # relaxing the policy for the whole namespace.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: observability-quota
+  namespace: observability
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    persistentvolumeclaims: "8"
+---
+# A LimitRange so a pod submitted without resources does not land unbounded.
+# An Elasticsearch node with no memory limit will happily consume a whole node
+# and take every other workload on it down.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: observability-defaults
+  namespace: observability
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+---
+# Default-deny egress and ingress for the namespace. Every allowed path is then
+# granted explicitly by the per-component NetworkPolicies. Starting from
+# default-allow and blocking things later never converges.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS must be allowed for anything else to work, since every component resolves
+# its peers by Service name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: observability
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

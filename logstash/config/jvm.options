@@ -1,0 +1,19 @@
+# Heap. Xms and Xmx are set equal so the JVM never pays to resize the heap at
+# runtime, and both are set well under the container memory limit to leave room
+# for the persistent queue's off-heap buffers and the JVM's own overhead.
+# Rule of thumb used here: heap = 50% of the container limit.
+-Xms1g
+-Xmx1g
+
+-XX:+UseG1GC
+-XX:G1ReservePercent=25
+-XX:InitiatingHeapOccupancyPercent=30
+
+-Djava.awt.headless=true
+-Dfile.encoding=UTF-8
+
+# Fail fast and let Kubernetes restart the pod rather than limping along in a
+# state where the pipeline is up but cannot allocate.
+-XX:+ExitOnOutOfMemoryError
+-XX:+HeapDumpOnOutOfMemoryError
+-XX:HeapDumpPath=/usr/share/logstash/data/heapdump.hprof

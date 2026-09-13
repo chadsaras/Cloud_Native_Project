@@ -1,0 +1,134 @@
+# Elastic Agent as a DaemonSet - one per node, collecting every container's
+# logs from that node's filesystem.
+#
+# DaemonSet rather than a sidecar per pod: a sidecar per application pod
+# doubles the pod count, duplicates the agent's memory footprint across every
+# replica, and means a collector upgrade is a redeploy of every application.
+# One agent per node reads all of them from /var/log/containers.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: elastic-agent
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: elastic-agent
+rules:
+  # Read-only, and only the resources needed to turn a log file path into
+  # meaningful metadata (which pod, which namespace, which labels).
+  - apiGroups: [""]
+    resources: [pods, nodes, namespaces, events, services]
+    verbs: [get, list, watch]
+  - apiGroups: ["apps"]
+    resources: [replicasets, deployments, daemonsets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  # No create, update, patch or delete anywhere. A collector that can modify
+  # cluster state is a lateral movement path, and it never needs to.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: elastic-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: elastic-agent
+subjects:
+  - kind: ServiceAccount
+    name: elastic-agent
+    namespace: observability
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: elastic-agent
+  namespace: observability
+  labels: { app: elastic-agent }
+spec:
+  selector:
+    matchLabels: { app: elastic-agent }
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels: { app: elastic-agent }
+    spec:
+      serviceAccountName: elastic-agent
+      # Needed to read /var/log/containers, which is a symlink farm into
+      # /var/lib/docker or /var/log/pods owned by root.
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
+
+      tolerations:
+        # Collect from control plane nodes too. Their logs are the ones that
+        # matter most during a cluster incident, and they are the ones a
+        # DaemonSet without tolerations silently skips.
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+
+      containers:
+        - name: elastic-agent
+          image: docker.elastic.co/beats/elastic-agent:8.13.4
+          args: ["-c", "/etc/agent.yml", "-e"]
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          securityContext:
+            runAsUser: 0
+            # Root is required to read other containers' log files. Narrowed by
+            # dropping every capability except the one that grants it.
+            capabilities:
+              drop: [ALL]
+              add:  [DAC_READ_SEARCH]
+          resources:
+            requests: { cpu: 100m, memory: 200Mi }
+            limits:   { cpu: 500m, memory: 500Mi }
+            # A collector must never be the reason a node runs out of memory.
+            # The limit is the important half here.
+          volumeMounts:
+            - { name: config,     mountPath: /etc/agent.yml, subPath: agent.yml, readOnly: true }
+            - { name: varlog,     mountPath: /var/log,            readOnly: true }
+            - { name: varlibdock, mountPath: /var/lib/docker/containers, readOnly: true }
+            - { name: state,      mountPath: /usr/share/elastic-agent/state }
+      volumes:
+        - name: config
+          configMap: { name: elastic-agent-config }
+        - name: varlog
+          hostPath: { path: /var/log }
+        - name: varlibdock
+          hostPath: { path: /var/lib/docker/containers }
+        - name: state
+          hostPath: { path: /var/lib/elastic-agent-state, type: DirectoryOrCreate }
+          # hostPath, not emptyDir: the read-offset registry must survive a pod
+          # restart. With an emptyDir, every agent restart re-reads every log
+          # file from the beginning and floods the cluster with duplicates.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: elastic-agent-policy
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels: { app: elastic-agent }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: logstash }
+      ports:
+        - { port: 5044, protocol: TCP }

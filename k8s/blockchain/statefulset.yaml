@@ -1,0 +1,168 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: chain-node
+  namespace: observability
+  labels: { app: blockchain-node }
+spec:
+  # Headless, so each pod gets a stable DNS name (chain-node-0.chain-node).
+  # Peers are addressed individually; load-balancing P2P traffic would mean a
+  # block gossiped to "the chain" reaches an arbitrary node and the sender
+  # never learns which, which breaks peer accounting entirely.
+  clusterIP: None
+  selector: { app: blockchain-node }
+  ports:
+    - { name: rpc, port: 8545 }
+    - { name: p2p, port: 30303 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chain-rpc
+  namespace: observability
+  labels: { app: blockchain-node }
+spec:
+  # Load-balanced RPC for clients. Deliberately separate from the headless
+  # Service: RPC is stateless and safe to balance, P2P is not.
+  type: ClusterIP
+  selector: { app: blockchain-node }
+  ports:
+    - { name: rpc, port: 8545, targetPort: 8545 }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chain-genesis
+  namespace: observability
+data:
+  # Pinned so every replica derives the same slot numbers. Replicas with
+  # different genesis times compute different proposers for the same moment
+  # and reject each other's blocks indefinitely - a failure that presents as
+  # a networking problem and is not one.
+  #
+  # Regenerate with: date +%s   (then restart the StatefulSet)
+  genesisTime: "1789200000"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chain-node
+  namespace: observability
+spec:
+  serviceName: chain-node
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: blockchain-node }
+  template:
+    metadata:
+      labels:
+        app: blockchain-node
+        service: blockchain-node
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+
+      affinity:
+        podAntiAffinity:
+          # Soft, not hard. Spreading validators across hosts limits how much
+          # stake a single host failure takes offline, but on a small cluster
+          # a hard constraint leaves pods unschedulable - and a validator that
+          # cannot start is worse than one sharing a host.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: blockchain-node }
+                topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: chain-node
+          image: sentinel/blockchain-node:0.3.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: rpc, containerPort: 8545 }
+            - { name: p2p, containerPort: 30303 }
+          env:
+            - name: NODE_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: CHAIN_ID
+              value: "31337"
+            - name: VALIDATOR_COUNT
+              value: "6"
+            - name: VALIDATOR_SEED
+              valueFrom:
+                secretKeyRef: { name: chain-secrets, key: validatorSeed }
+            - name: GENESIS_TIME
+              valueFrom:
+                configMapKeyRef: { name: chain-genesis, key: genesisTime }
+            - name: SLOT_SECONDS
+              value: "4"
+            - name: SLOTS_PER_EPOCH
+              value: "8"
+            - name: RPC_ENABLED_NAMESPACES
+              value: "eth,net,web3"
+              # The administrative namespaces (admin, personal, debug, miner)
+              # are deliberately absent. This is the most security-relevant
+              # line in the manifest: exposing them on a reachable interface
+              # is exactly the misconfiguration BC-001 exists to detect.
+            - name: SELF_URL
+              value: "http://$(NODE_ID).chain-node:30303"
+            - name: BOOTNODES
+              value: "http://chain-node-0.chain-node:30303"
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: "/healthz", port: 8545 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: "/healthz", port: 8545 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 4
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 32Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: blockchain-node-policy
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels: { app: blockchain-node }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: blockchain-node }
+      ports:
+        - { port: 30303, protocol: TCP }
+    - from:
+        - podSelector: {}
+      ports:
+        - { port: 8545, protocol: TCP }
+  egress:
+    # Outbound to other validators only. The node never needs to reach the
+    # logging platform: its events leave via stdout and are collected off the
+    # node filesystem by the agent. A compromised validator therefore has no
+    # network path to tamper with the record of its own compromise.
+    - to:
+        - podSelector:
+            matchLabels: { app: blockchain-node }
+      ports:
+        - { port: 30303, protocol: TCP }

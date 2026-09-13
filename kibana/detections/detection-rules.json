@@ -1,0 +1,764 @@
+{
+  "_meta": {
+    "description": "Detection rules as code. Each rule is an Elasticsearch query plus a threshold, versioned in git and installed by scripts/install-detections.sh via the Kibana Detection Engine API.",
+    "why_as_code": "Rules built by clicking through the Kibana UI exist only in that cluster. Keeping them as JSON in git means they are reviewable in a PR, diffable when a threshold changes, and reproducible when the cluster is rebuilt. Tuning a threshold becomes a commit with a reason attached rather than an undocumented change someone made at 2am.",
+    "mitre_reference": "https://attack.mitre.org/",
+    "rule_families": {
+      "SEC": "Application security: authentication, injection, exfiltration",
+      "BC": "Blockchain node security: consensus, JSON-RPC, P2P, mempool",
+      "OPS": "Platform and pipeline health"
+    }
+  },
+  "rules": [
+    {
+      "rule_id": "BC-001",
+      "name": "RPC Administrative Namespace Probe",
+      "description": "Calls to administrative JSON-RPC namespaces (admin, personal, debug, miner, txpool) from an external source. These namespaces control node administration and account access rather than ordinary chain reads, and a node exposing them on a public interface is the configuration that has historically led to direct theft of funds.",
+      "risk_score": 90,
+      "severity": "critical",
+      "type": "threshold",
+      "index": [
+        "logs-blockchain.rpc-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:rpc_unauthorized",
+      "threshold": {
+        "field": [
+          "source.ip"
+        ],
+        "value": 3,
+        "cardinality": [
+          {
+            "field": "blockchain.rpc.method",
+            "value": 2
+          }
+        ]
+      },
+      "interval": "2m",
+      "from": "now-10m",
+      "_detection_note": "Keyed on distinct blockchain.rpc.method rather than on HTTP request count, because JSON-RPC supports batching: a scanner can hide dozens of admin probes inside one HTTP request. A rule counting requests would see a single hit where a rule counting methods sees the whole sweep.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0007",
+            "name": "Discovery"
+          },
+          "technique": [
+            {
+              "id": "T1046",
+              "name": "Network Service Discovery"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "An internal operations tool legitimately calling admin_peers for monitoring. Should be allowed by source IP, not by lowering the threshold.",
+        "A block explorer or indexer calling debug_ methods against a node intended to serve them - in which case the namespace should be explicitly enabled and this node moved off the public interface."
+      ],
+      "investigation_steps": [
+        "List the distinct blockchain.rpc.method values from this source. A sequence of personal_listAccounts followed by personal_unlockAccount is an attempt to find and drain an unlocked account.",
+        "Verify which namespaces this node actually exposes - the alert means the call was blocked, but confirm the node's configuration rather than trusting that.",
+        "Check whether the RPC port is reachable from outside the intended network at all. If it is, that is the finding, independent of this particular scan.",
+        "Pivot on source.ip across all datasets to see what else it touched."
+      ]
+    },
+    {
+      "rule_id": "BC-002",
+      "name": "RPC Resource Exhaustion - wide-range or expensive queries",
+      "description": "Repeated JSON-RPC calls whose cost is controlled by the caller, such as eth_getLogs over a very large block range. One cheap HTTP request can force the node into an arbitrarily expensive scan, making this a denial-of-service primitive rather than merely impolite usage.",
+      "risk_score": 62,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-blockchain.rpc-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:rpc_expensive or event.action:rpc_flood",
+      "threshold": {
+        "field": [
+          "source.ip"
+        ],
+        "value": 3
+      },
+      "interval": "5m",
+      "from": "now-15m",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0040",
+            "name": "Impact"
+          },
+          "technique": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service",
+              "subtechnique": [
+                {
+                  "id": "T1499.002",
+                  "name": "Service Exhaustion Flood"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "An indexer backfilling historical data legitimately. Distinguishable by a stable source IP with a business relationship, and better solved with a dedicated archive node than by muting this."
+      ],
+      "investigation_steps": [
+        "Check blockchain.rpc.block_range - a range spanning the whole chain is a scan, not a query.",
+        "Compare event.duration across these calls to see what the node actually spent.",
+        "Confirm whether a range cap is enforced; if requests are succeeding rather than being rejected, the cap is missing or too high."
+      ]
+    },
+    {
+      "rule_id": "BC-003",
+      "name": "Deep Chain Reorganisation",
+      "description": "The canonical chain was rewritten by more than two blocks. Shallow one or two block reorgs are normal and happen whenever two proposers produce near-simultaneously. Deep reorgs are not normal: they indicate either a network partition healing or an actor with enough stake to rewrite recent history.",
+      "risk_score": 85,
+      "severity": "critical",
+      "type": "query",
+      "index": [
+        "logs-blockchain.consensus-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:chain_reorg and blockchain.reorg_depth > 2",
+      "interval": "1m",
+      "from": "now-5m",
+      "_detection_note": "Depth is the entire signal, which is why the rule filters on blockchain.reorg_depth rather than firing on the event. A rule that alerted on any reorg would fire constantly during normal operation and be muted within a day.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0040",
+            "name": "Impact"
+          },
+          "technique": [
+            {
+              "id": "T1565",
+              "name": "Data Manipulation"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A node resyncing after extended downtime will import a long branch and reorg onto it. Distinguishable because it happens once at startup and the node was demonstrably offline."
+      ],
+      "investigation_steps": [
+        "Read blockchain.reorg_depth and blockchain.common_ancestor to see how far back the rewrite went.",
+        "Determine whether any transaction considered final was reverted - that is the actual business impact.",
+        "Check whether other nodes saw the same reorg. A reorg seen by one node only means that node was partitioned, not that the chain rewrote.",
+        "Correlate with peer events: a reorg immediately following heavy peer churn suggests an eclipse attempt rather than an honest fork."
+      ]
+    },
+    {
+      "rule_id": "BC-004",
+      "name": "Slashable Offence - validator signed conflicting messages",
+      "description": "A validator produced two different blocks or two different attestations for the same slot. This is provably slashable from the signatures alone and requires no privileged access to verify. The overwhelmingly common cause is not an attack but an operator running the same validator keys in two places at once, typically after a failover that did not cleanly stop the original instance.",
+      "risk_score": 99,
+      "severity": "critical",
+      "type": "query",
+      "index": [
+        "logs-blockchain.consensus-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:slashable_offence",
+      "interval": "1m",
+      "from": "now-5m",
+      "_threshold_note": "No threshold, and none is defensible. A single double-signature costs a minimum penalty immediately, ejects the validator, and incurs a correlation penalty that scales with how much stake was slashed in the same window - which is what turns one operator's failover mistake across a large fleet into a catastrophic loss rather than a merely expensive one. Waiting for a second occurrence to alert would be waiting while the meter runs.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0040",
+            "name": "Impact"
+          },
+          "technique": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A deliberate slashing test on a testnet. Should be suppressed by chain_id, never by disabling the rule.",
+        "Replayed historical evidence during a node resync. Distinguishable because blockchain.slot will be far behind the current head."
+      ],
+      "investigation_steps": [
+        "Read blockchain.slashing.kind: double_proposal means two blocks, double_vote means two attestations.",
+        "Take the two hashes in blockchain.slashing.evidence - these ARE the evidence and are independently verifiable by anyone.",
+        "Identify every host running blockchain.validator.index and shut down all but one IMMEDIATELY. Every further slot of overlap adds another offence.",
+        "Check whether a failover, deploy, or container restart happened just before blockchain.slot - that is almost always the trigger.",
+        "Confirm the anti-slashing database was present and persistent on both hosts; an ephemeral volume defeats it entirely."
+      ]
+    },
+    {
+      "rule_id": "BC-005",
+      "name": "Validator Liveness Degraded - missed duties or stalled finality",
+      "description": "A validator missed proposal duties, or the chain stopped finalizing. Missed duties cost small continuous penalties; stalled finality is far more serious because after several epochs without finality the protocol begins draining stake from non-participating validators until finality resumes.",
+      "risk_score": 70,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-blockchain.consensus-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:duty_missed or event.action:finality_stalled",
+      "threshold": {
+        "field": [
+          "blockchain.node_id"
+        ],
+        "value": 3
+      },
+      "interval": "5m",
+      "from": "now-15m",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0040",
+            "name": "Impact"
+          },
+          "technique": [
+            {
+              "id": "T1489",
+              "name": "Service Stop"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A planned client upgrade with a short downtime window. Should be suppressed for the duration of the change, with an end time."
+      ],
+      "investigation_steps": [
+        "Separate the two causes: duty_missed is usually local (node down, clock skew, peer starvation) while finality_stalled is usually network-wide.",
+        "Check blockchain.participation - a low value across the network points away from this operator.",
+        "Verify system clock synchronisation. Clock drift causes a validator to act on the wrong slot and miss duties it believes it performed.",
+        "Check peer count; a validator with too few peers cannot receive the blocks it needs to attest to in time."
+      ]
+    },
+    {
+      "rule_id": "BC-006",
+      "name": "Mempool Flooding",
+      "description": "A single source submitted transactions far above normal rate. Fills the transaction pool with low-value entries, delaying legitimate transactions and increasing node memory pressure.",
+      "risk_score": 60,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-blockchain.mempool-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:mempool_flood or event.action:tx_rejected",
+      "threshold": {
+        "field": [
+          "source.ip"
+        ],
+        "value": 2
+      },
+      "interval": "5m",
+      "from": "now-15m",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0040",
+            "name": "Impact"
+          },
+          "technique": [
+            {
+              "id": "T1499",
+              "name": "Endpoint Denial of Service"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A legitimate high-frequency trading bot or batch settlement process. Should be allowlisted by sender address rather than by source IP, which it may rotate."
+      ],
+      "investigation_steps": [
+        "Check blockchain.mempool.size to see whether the pool is actually under pressure or the flood was absorbed.",
+        "Look at blockchain.rejection_reason - a flood of duplicates behaves differently from a flood of distinct transactions.",
+        "Confirm whether these transactions are being included in blocks or merely occupying the pool."
+      ]
+    },
+    {
+      "rule_id": "BC-007",
+      "name": "Invalid Block Propagation from Peer",
+      "description": "A peer sent blocks that failed validation. A peer running incompatible software and a peer deliberately feeding invalid data look identical at the connection level; the rejection reason is what separates them.",
+      "risk_score": 55,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-blockchain.consensus-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:block_rejected",
+      "threshold": {
+        "field": [
+          "blockchain.peer.id"
+        ],
+        "value": 5
+      },
+      "interval": "5m",
+      "from": "now-15m",
+      "_detection_note": "Thresholded rather than firing on a single rejection, because one invalid block during a client upgrade window is ordinary. A peer sending five is not making a mistake.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0001",
+            "name": "Initial Access"
+          },
+          "technique": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A peer mid-upgrade briefly producing blocks this client version rejects. Distinguishable because the rejection reason will be consistent and structural rather than varied."
+      ],
+      "investigation_steps": [
+        "Group by blockchain.rejection_reason. A single consistent reason suggests a version mismatch; varied reasons including bad_signature and wrong_proposer suggest deliberate probing.",
+        "A timestamp_in_future rejection is especially notable - a block dated ahead would win fork choice if accepted, so it is an attempt at forced reorganisation.",
+        "Check whether this peer also appears in peer churn events.",
+        "Consider disconnecting and banning the peer if reasons are varied."
+      ]
+    },
+    {
+      "rule_id": "BC-008",
+      "name": "Peer Table Churn - possible eclipse attempt",
+      "description": "Rapid cycling of peer connections. An eclipse attack works by repeatedly filling a victim's peer table with attacker-controlled nodes until the victim's entire view of the network comes from the attacker, at which point it can be fed a false chain.",
+      "risk_score": 70,
+      "severity": "high",
+      "type": "query",
+      "index": [
+        "logs-blockchain.p2p-*"
+      ],
+      "language": "kuery",
+      "query": "event.action:peer_churn",
+      "interval": "5m",
+      "from": "now-15m",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0005",
+            "name": "Defense Evasion"
+          },
+          "technique": [
+            {
+              "id": "T1557",
+              "name": "Adversary-in-the-Middle"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A node restarting rebuilds its peer table quickly and legitimately. Distinguishable because it coincides with a node_start event."
+      ],
+      "investigation_steps": [
+        "Check blockchain.peer.count after the churn - an eclipse attempt drives the honest peer count down while total connections stay high.",
+        "Look at the source IP distribution of the new peers. A narrow range or single ASN is a strong indicator.",
+        "Correlate with BC-003: churn followed by a reorg only this node saw is the eclipse actually succeeding.",
+        "Verify the node has a healthy number of outbound connections to known-good peers."
+      ]
+    },
+    {
+      "rule_id": "OPS-001",
+      "name": "Error Rate Spike - sustained 5xx responses",
+      "description": "More than 50 5xx responses in 5 minutes. Operational rather than security, but it belongs in the same queue because a spike in 5xx is also what exploitation of a crashing endpoint looks like.",
+      "risk_score": 40,
+      "severity": "medium",
+      "type": "threshold",
+      "index": [
+        "logs-nginx.access-*",
+        "logs-app.checkout-*"
+      ],
+      "language": "kuery",
+      "query": "http.response.status_class:5xx or event.outcome:failure",
+      "threshold": {
+        "field": [
+          "service.name"
+        ],
+        "value": 50
+      },
+      "interval": "5m",
+      "from": "now-10m",
+      "false_positives": [
+        "A deploy rolling through with a brief error window. Correlate against deployment events before escalating."
+      ],
+      "investigation_steps": [
+        "Group by url.path to find whether it is one endpoint or the whole service.",
+        "Check error.type and error.stack_trace on the app-side events for the actual exception.",
+        "Check whether the source IPs are diverse (a genuine outage) or concentrated (someone driving it)."
+      ]
+    },
+    {
+      "rule_id": "OPS-002",
+      "name": "Log Pipeline Stalled - no heartbeat received",
+      "description": "The Logstash heartbeat stopped arriving. This is the rule that makes every other rule trustworthy: without it, a dead pipeline looks exactly like a quiet night.",
+      "risk_score": 60,
+      "severity": "high",
+      "type": "query",
+      "index": [
+        "metrics-logstash.heartbeat-*"
+      ],
+      "language": "kuery",
+      "query": "event.dataset:logstash.heartbeat",
+      "interval": "2m",
+      "from": "now-6m",
+      "_inverted_note": "This is an absence-of-signal rule and must be configured in Kibana with the alert condition inverted - it fires when the count is ZERO, not when it crosses a threshold. The 2m interval against a 6m lookback means three consecutive missed heartbeats (which arrive every 30s) before it fires, so a single Logstash restart does not page anyone.",
+      "false_positives": [
+        "A planned Logstash restart or node drain, which produces a gap of up to two minutes."
+      ],
+      "investigation_steps": [
+        "Check Logstash pod status and recent restarts.",
+        "Check the persistent queue depth on the Logstash API at :9600/_node/stats/pipelines - a full queue means Elasticsearch is rejecting writes.",
+        "Check Elasticsearch cluster health; a red or yellow cluster blocks indexing and backs the queue up."
+      ]
+    },
+    {
+      "rule_id": "SEC-001",
+      "name": "Brute Force - repeated authentication failures against one account",
+      "description": "A single source IP produced 10 or more failed logins against the same user within 5 minutes. This is the classic password-guessing pattern against a known account.",
+      "risk_score": 73,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-app.auth-*"
+      ],
+      "language": "kuery",
+      "query": "event.category:authentication and event.action:user_login and event.outcome:failure",
+      "threshold": {
+        "field": [
+          "source.ip",
+          "user.name"
+        ],
+        "value": 10
+      },
+      "interval": "1m",
+      "from": "now-6m",
+      "_lookback_note": "The 6m lookback against a 1m interval gives 5x overlap. Overlap is deliberate: it absorbs the 10s refresh_interval plus any ingest lag, so an event that arrives late is still evaluated. The cost is that one burst can alert on consecutive runs, which is handled downstream by alert suppression rather than by shrinking the window.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0006",
+            "name": "Credential Access"
+          },
+          "technique": [
+            {
+              "id": "T1110",
+              "name": "Brute Force",
+              "subtechnique": [
+                {
+                  "id": "T1110.001",
+                  "name": "Password Guessing"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A misconfigured service account retrying with a stale credential after a password rotation. Distinguishable because the source IP is internal and the user.name matches svc-*.",
+        "A user whose saved browser password is stale, typically under 10 attempts and from a residential IP that has authenticated successfully before."
+      ],
+      "investigation_steps": [
+        "Check whether any attempt from this source.ip succeeded: same query with event.outcome:success.",
+        "If one succeeded, treat as a confirmed compromise and pivot on user.name across all datasets for the following hour.",
+        "Check source.geo.country_name and source.as.organization.name against the user's normal pattern.",
+        "Confirm the app-side lockout fired: event.action:account_locked for the same user."
+      ]
+    },
+    {
+      "rule_id": "SEC-002",
+      "name": "Password Spray - one source failing against many distinct accounts",
+      "description": "A single source IP produced failed logins against 15 or more distinct usernames within 15 minutes. Spraying stays under per-account lockout thresholds by trying one or two passwords against a large set of accounts, which is exactly why SEC-001 alone does not catch it.",
+      "risk_score": 78,
+      "severity": "high",
+      "type": "threshold",
+      "index": [
+        "logs-app.auth-*"
+      ],
+      "language": "kuery",
+      "query": "event.category:authentication and event.outcome:failure",
+      "threshold": {
+        "field": [
+          "source.ip"
+        ],
+        "value": 1,
+        "cardinality": [
+          {
+            "field": "user.name",
+            "value": 15
+          }
+        ]
+      },
+      "interval": "5m",
+      "from": "now-20m",
+      "_detection_note": "The signal is cardinality of user.name, not count of failures. An attacker spraying 200 accounts once each produces 200 events that SEC-001 will never see, because no single account crosses its threshold.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0006",
+            "name": "Credential Access"
+          },
+          "technique": [
+            {
+              "id": "T1110",
+              "name": "Brute Force",
+              "subtechnique": [
+                {
+                  "id": "T1110.003",
+                  "name": "Password Spraying"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A load test or QA suite exercising the login endpoint with generated usernames. Should be excluded by source IP range, not by raising the threshold."
+      ],
+      "investigation_steps": [
+        "Aggregate user.name for this source.ip to see whether the account list looks enumerated (user001, user002...) or targeted (real employee names).",
+        "A targeted list implies prior reconnaissance and the attacker already has a roster from somewhere - widen the investigation.",
+        "Check for any event.outcome:success from this IP across the full retention window."
+      ]
+    },
+    {
+      "rule_id": "SEC-003",
+      "name": "Endpoint Enumeration - high 404 ratio from a single source",
+      "description": "A source IP generated 25 or more 404 responses across 15 or more distinct URL paths in 10 minutes. This is directory and endpoint discovery, usually the first stage of a web attack.",
+      "risk_score": 46,
+      "severity": "medium",
+      "type": "threshold",
+      "index": [
+        "logs-nginx.access-*"
+      ],
+      "language": "kuery",
+      "query": "http.response.status_code:404 and source.ip_scope:public",
+      "threshold": {
+        "field": [
+          "source.ip"
+        ],
+        "value": 25,
+        "cardinality": [
+          {
+            "field": "url.path",
+            "value": 15
+          }
+        ]
+      },
+      "interval": "5m",
+      "from": "now-15m",
+      "_tuning_note": "Medium severity, not high. Scanning is constant background noise on anything internet-facing and alerting at high severity here is the fastest way to train an analyst to ignore the queue. It matters as corroboration when it precedes something else from the same IP.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0043",
+            "name": "Reconnaissance"
+          },
+          "technique": [
+            {
+              "id": "T1595",
+              "name": "Active Scanning",
+              "subtechnique": [
+                {
+                  "id": "T1595.003",
+                  "name": "Wordlist Scanning"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "Search engine crawlers following stale links. Distinguishable by user_agent.category:bot and by reverse DNS.",
+        "A broken deploy that removed routes the frontend still calls - this produces 404s from many source IPs, not one."
+      ],
+      "investigation_steps": [
+        "Look at the url.path list - requests for /.env, /.git/config or /.aws/credentials indicate a targeted secret hunt, not a generic crawler.",
+        "Check whether any request from this IP returned 200, which would mean something was found.",
+        "Correlate with SEC-004 for the same source.ip."
+      ]
+    },
+    {
+      "rule_id": "SEC-004",
+      "name": "Web Attack Payload - injection or traversal signature matched",
+      "description": "The application's request inspection blocked a payload matching a known attack signature (SQL injection, path traversal, XSS, or command injection). Fires on a single occurrence.",
+      "risk_score": 73,
+      "severity": "high",
+      "type": "query",
+      "index": [
+        "logs-app.waf-*"
+      ],
+      "language": "kuery",
+      "query": "event.category:intrusion_detection and event.action:payload_blocked",
+      "interval": "1m",
+      "from": "now-5m",
+      "_threshold_note": "No threshold - one confirmed injection attempt is worth seeing. This is affordable precisely because the signature already matched: the rule inherits the specificity of the pattern rather than trying to find the attack in raw traffic itself.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0001",
+            "name": "Initial Access"
+          },
+          "technique": [
+            {
+              "id": "T1190",
+              "name": "Exploit Public-Facing Application"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A security scanner running as part of an authorised penetration test. Should be suppressed by source IP for the duration of the engagement, with an end date.",
+        "A legitimate request containing a string that looks like SQL - rare, and visible in rule.name plus labels.payload_sample."
+      ],
+      "investigation_steps": [
+        "Read rule.name to identify the signature class and labels.payload_sample for the attempt itself.",
+        "Confirm the request was actually blocked - check http.response.status_code is 400, not 200.",
+        "If any request from this source returned 200 on the same path, assume the block was bypassed and escalate."
+      ]
+    },
+    {
+      "rule_id": "SEC-005",
+      "name": "Possible Data Exfiltration - anomalous bulk read volume",
+      "description": "A single user account read 20000 or more customer records within 30 minutes. Sized against normal analyst behaviour, which is well under 1000 records in the same window.",
+      "risk_score": 85,
+      "severity": "critical",
+      "type": "threshold",
+      "index": [
+        "logs-app.data-*"
+      ],
+      "language": "kuery",
+      "query": "event.category:database and event.action:bulk_read",
+      "threshold": {
+        "field": [
+          "user.name"
+        ],
+        "value": 4,
+        "cardinality": [
+          {
+            "field": "source.ip",
+            "value": 1
+          }
+        ]
+      },
+      "interval": "10m",
+      "from": "now-35m",
+      "_threshold_note": "Counting events rather than summing labels.record_count is a real limitation of threshold rules, which cannot aggregate a numeric field. Four bulk reads at the 5000 maximum page size is 20000 records. The sum-based version needs an ES|QL rule; the tracking issue is noted in docs/roadmap.md.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0010",
+            "name": "Exfiltration"
+          },
+          "technique": [
+            {
+              "id": "T1530",
+              "name": "Data from Cloud Storage Object"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A scheduled batch export by svc-batch during its normal window. This is the reason the rule needs a time-of-day exception rather than a higher threshold - raising the threshold would blind it to a real attacker moving slightly slower."
+      ],
+      "investigation_steps": [
+        "Compare source.ip against the account's normal source - a service account reading from a new IP is the strongest single signal here.",
+        "Check whether this user authenticated normally beforehand, or whether SEC-001 or SEC-002 fired for the account earlier.",
+        "Establish whether the volume and hour match the documented batch schedule."
+      ]
+    },
+    {
+      "rule_id": "SEC-006",
+      "name": "Privilege Escalation - admin role granted",
+      "description": "An account was granted the admin role. Low volume by nature, so every occurrence is reviewed.",
+      "risk_score": 68,
+      "severity": "high",
+      "type": "query",
+      "index": [
+        "logs-app.iam-*"
+      ],
+      "language": "kuery",
+      "query": "event.category:iam and event.action:role_grant and labels.granted_role:admin",
+      "interval": "5m",
+      "from": "now-10m",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0004",
+            "name": "Privilege Escalation"
+          },
+          "technique": [
+            {
+              "id": "T1098",
+              "name": "Account Manipulation"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "Legitimate onboarding of a new administrator, which should correspond to an approved change ticket."
+      ],
+      "investigation_steps": [
+        "Identify the actor in user.name and confirm they are authorised to grant roles at all.",
+        "A service account granting admin is almost never legitimate - svc-* in user.name should be treated as compromise until disproved.",
+        "Match against the change management record; absence of one is the finding."
+      ]
+    },
+    {
+      "rule_id": "SEC-007",
+      "name": "Threat Intelligence Match - traffic from a known-bad indicator",
+      "description": "Any event whose source IP matched the internal threat intelligence feed during enrichment.",
+      "risk_score": 78,
+      "severity": "high",
+      "type": "query",
+      "index": [
+        "logs-*"
+      ],
+      "language": "kuery",
+      "query": "threat.indicator.matched:* and not threat.indicator.matched:none",
+      "interval": "2m",
+      "from": "now-7m",
+      "_design_note": "The enrichment happened at ingest, so this rule is a cheap keyword match rather than a join against an indicator index at query time. That is the payoff for spending the CPU in the Logstash enrich stage.",
+      "threat": [
+        {
+          "framework": "MITRE ATT&CK",
+          "tactic": {
+            "id": "TA0011",
+            "name": "Command and Control"
+          },
+          "technique": [
+            {
+              "id": "T1071",
+              "name": "Application Layer Protocol"
+            }
+          ]
+        }
+      ],
+      "false_positives": [
+        "A stale indicator whose IP has been reassigned. This is why threat.indicator.provider is recorded - indicators need an expiry and a source."
+      ],
+      "investigation_steps": [
+        "Read threat.indicator.matched for the reason the IP is listed.",
+        "Pivot on source.ip across all datasets to build the full timeline of what it touched.",
+        "Check whether it reached any authenticated endpoint successfully."
+      ]
+    }
+  ]
+}

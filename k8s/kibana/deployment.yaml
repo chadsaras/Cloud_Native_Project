@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: observability
+  labels: { app: kibana }
+spec:
+  selector: { app: kibana }
+  ports:
+    - { name: http, port: 5601, targetPort: 5601 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: kibana }
+  template:
+    metadata:
+      labels: { app: kibana }
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.13.4
+          ports:
+            - { name: http, containerPort: 5601 }
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: "https://elasticsearch-client:9200"
+            - name: ELASTICSEARCH_USERNAME
+              value: "kibana_system"
+            - name: ELASTICSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: kibana-credentials, key: password }
+            - name: ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES
+              value: "/usr/share/kibana/config/certs/ca.crt"
+            - name: SERVER_PUBLICBASEURL
+              value: "https://kibana.internal.example.com"
+              # Required once Kibana is behind a proxy, otherwise generated
+              # links and the alerting emails point at localhost:5601.
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              valueFrom:
+                secretKeyRef: { name: kibana-credentials, key: encryptionKey }
+              # The Detection Engine stores rule state encrypted with this key.
+              # If it changes, every existing rule becomes undecryptable and
+              # has to be recreated - which is a strong argument for keeping
+              # the rules in git, as this project does.
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits:   { cpu: "1",  memory: 2Gi }
+          volumeMounts:
+            - { name: certs, mountPath: /usr/share/kibana/config/certs, readOnly: true }
+          startupProbe:
+            httpGet: { path: "/api/status", port: 5601 }
+            failureThreshold: 30
+            periodSeconds: 10
+            # Kibana's first boot runs saved-object migrations, which on a
+            # large existing installation genuinely takes minutes. Killing it
+            # partway through a migration is one of the few ways to corrupt
+            # the .kibana index.
+          readinessProbe:
+            httpGet: { path: "/api/status", port: 5601 }
+            periodSeconds: 15
+          livenessProbe:
+            httpGet: { path: "/api/status", port: 5601 }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 4
+      volumes:
+        - name: certs
+          secret: { secretName: elasticsearch-certs }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kibana-policy
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels: { app: kibana }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+      ports:
+        - { port: 5601, protocol: TCP }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: elasticsearch }
+      ports:
+        - { port: 9200, protocol: TCP }

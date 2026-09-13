@@ -1,0 +1,63 @@
+# Filebeat - the collector for the Docker Compose stack.
+#
+# The Kubernetes deployment uses Elastic Agent instead (k8s/agent/), which is
+# the supported path there. Filebeat is used here because it configures in one
+# file and does not need a Fleet server to exist first.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      # Only collect from containers that opted in with the label. Collecting
+      # everything means collecting Elasticsearch's own logs, which then get
+      # indexed into Elasticsearch, which produces more logs - a feedback loop
+      # that is genuinely hard to diagnose once it starts.
+      templates:
+        - condition:
+            contains:
+              docker.container.labels.co_elastic_logs/enabled: "true"
+          config:
+            - type: container
+              paths:
+                - /var/lib/docker/containers/${data.docker.container.id}/*.log
+              # Stack traces arrive as many lines but are one event. Without
+              # this, a single Python traceback becomes 15 disconnected
+              # documents and the error is unsearchable.
+              multiline:
+                type: pattern
+                pattern: '^[[:space:]]+(at|\.{3})[[:space:]]|^Caused by:|^Traceback|^[[:space:]]+File "'
+                negate: false
+                match: after
+                max_lines: 100
+                timeout: 5s
+
+processors:
+  # Attach container name, image and labels to every event.
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+
+  # Drop Filebeat's own agent bookkeeping fields that nothing queries. They are
+  # small individually and meaningful at a hundred million events a day.
+  - drop_fields:
+      fields: ["agent.ephemeral_id", "agent.id", "ecs.version", "input.type"]
+      ignore_missing: true
+
+output.logstash:
+  hosts: ["logstash:5044"]
+
+  # Load balance across Logstash instances when there is more than one. In
+  # Compose there is one; in Kubernetes the Service resolves to several.
+  loadbalance: true
+
+  # Backpressure: if Logstash is slow, Filebeat slows down reading rather than
+  # buffering without bound. The container log files on disk become the buffer,
+  # which is exactly what they are good for.
+  bulk_max_size: 512
+  ttl: 30s
+
+# Filebeat's own logs, so a collector failure is visible.
+logging.level: info
+logging.to_stderr: true
+
+# Registry - where read offsets are stored. Mounted on a volume so a restart
+# resumes where it left off instead of re-reading every file from the start.
+filebeat.registry.path: /usr/share/filebeat/data/registry

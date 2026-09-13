@@ -1,0 +1,268 @@
+# Local development stack.
+#
+# This is the full pipeline - app -> nginx -> Filebeat -> Logstash ->
+# Elasticsearch -> Kibana - on one machine. The Kubernetes manifests in k8s/
+# deploy the same components; this exists so the pipeline can be developed and
+# tested without a cluster.
+#
+# Security is deliberately relaxed here (single node, trial licence, a shared
+# password from .env). See k8s/ for the version with TLS between every hop.
+
+name: sentinel-platform
+
+services:
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: sentinel-elasticsearch
+    environment:
+      - node.name=es01
+      - discovery.type=single-node
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme-local-only}
+      - xpack.security.enabled=true
+      # TLS off for local only. The moment this is reachable from anywhere but
+      # localhost it needs the certificate setup the k8s manifests use.
+      - xpack.security.http.ssl.enabled=false
+      - xpack.license.self_generated.type=trial
+      # Heap at 50% of the memory limit, Xms == Xmx so the JVM never resizes.
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      # Elasticsearch locks its heap into RAM. If the heap can be swapped, a GC
+      # pause turns into seconds of disk IO and the node drops out of the
+      # cluster. This ulimit is what allows bootstrap.memory_lock to work.
+      nofile:  { soft: 65536, hard: 65536 }
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    mem_limit: 2g
+    healthcheck:
+      # Yellow, not green: a single-node cluster can never be green because
+      # replica shards have nowhere to go. Waiting for green here deadlocks.
+      test: ["CMD-SHELL", "curl -sf -u elastic:${ELASTIC_PASSWORD:-changeme-local-only} 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # Bootstrap. Elasticsearch creates the `elastic` superuser from
+  # ELASTIC_PASSWORD, but the built-in `kibana_system` account is created
+  # without a usable password. Kibana authenticates as that account, not as
+  # elastic, so without this step Kibana fails auth on every boot with a 401
+  # that looks like a config error. This sets it via the security API once the
+  # cluster is up, then exits.
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: sentinel-setup
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme-local-only}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD:-changeme-local-only}
+    command:
+      - bash
+      - -c
+      - |
+        set -eu
+        echo "Setting kibana_system password..."
+        until curl -sf -u "elastic:${ELASTIC_PASSWORD}" \
+          -X POST "http://elasticsearch:9200/_security/user/kibana_system/_password" \
+          -H 'Content-Type: application/json' \
+          -d "{\"password\":\"${KIBANA_PASSWORD}\"}"; do
+          echo "  retrying..."; sleep 5
+        done
+        echo ""
+        echo "Bootstrap complete."
+    restart: "no"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: sentinel-kibana
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+      setup:        { condition: service_completed_successfully }
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD:-changeme-local-only}
+      # Required for the Detection Engine to store its own encrypted state.
+      # Must be at least 32 characters and stable across restarts, otherwise
+      # every saved rule becomes undecryptable on the next boot.
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY:-a-32-character-or-longer-local-key-0001}
+      - XPACK_SECURITY_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY:-a-32-character-or-longer-local-key-0001}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY:-a-32-character-or-longer-local-key-0001}
+    ports:
+      - "127.0.0.1:5601:5601"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 90s
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.13.4
+    container_name: sentinel-logstash
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme-local-only}
+      - PIPELINE_WORKERS=2
+      - LOG_LEVEL=info
+      - LS_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/config/threat_intel.yml:/usr/share/logstash/config/threat_intel.yml:ro
+      - ls-data:/usr/share/logstash/data
+    ports:
+      - "127.0.0.1:5044:5044"   # beats
+      - "127.0.0.1:5000:5000"   # tcp json, dev only
+      - "127.0.0.1:9600:9600"   # monitoring api
+    mem_limit: 1500m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9600/_node/pipelines/main | grep -q '\"main\"' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  payments-api:
+    build:
+      context: ./demo-app
+      dockerfile: Dockerfile
+    container_name: sentinel-payments-api
+    environment:
+      - SERVICE_NAME=payments-api
+      - SERVICE_VERSION=1.4.2
+      - SERVICE_ENV=production
+      - LOG_LEVEL=INFO
+      - SIMULATED_ERROR_RATE=0.04
+      - SIMULATED_SLOW_RATE=0.06
+      - LOCKOUT_THRESHOLD=5
+    # Labels are how Filebeat's autodiscover decides what to collect and how to
+    # tag it, rather than hardcoding container names in the Filebeat config.
+    labels:
+      co.elastic.logs/enabled: "true"
+      app: "payments-api"
+    mem_limit: 256m
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sentinel-nginx
+    depends_on: [payments-api]
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "127.0.0.1:8080:80"
+    labels:
+      co.elastic.logs/enabled: "true"
+      app: "nginx"
+    mem_limit: 128m
+
+  # --- Blockchain testnet ---------------------------------------------------
+  # Three validator nodes. Each runs a distinct, non-overlapping slice of the
+  # validator set, which is the correct configuration: overlapping slices
+  # would double-sign immediately. scripts/blockchain_attacks.py stages that
+  # overlap deliberately.
+  #
+  # GENESIS_TIME must be identical across nodes. Slot numbers are derived from
+  # it, so nodes with different genesis times compute different proposers for
+  # the same wall-clock moment and reject each other's blocks continuously.
+
+  chain-node-0:
+    build:
+      context: ./blockchain-node
+      dockerfile: Dockerfile
+    container_name: sentinel-chain-0
+    environment:
+      - NODE_ID=node-0
+      - CHAIN_ID=31337
+      - RPC_PORT=8545
+      - P2P_PORT=30303
+      - SELF_URL=http://chain-node-0:30303
+      - VALIDATOR_COUNT=6
+      - VALIDATOR_INDICES=0,1
+      - VALIDATOR_SEED=${VALIDATOR_SEED:-sentinel-testnet}
+      - GENESIS_TIME=${GENESIS_TIME:-0}
+      - SLOT_SECONDS=${SLOT_SECONDS:-4}
+      - SLOTS_PER_EPOCH=8
+      - RPC_ENABLED_NAMESPACES=eth,net,web3
+      - LOG_LEVEL=INFO
+    ports:
+      - "127.0.0.1:8545:8545"
+    labels:
+      co.elastic.logs/enabled: "true"
+      app: "blockchain-node"
+    mem_limit: 256m
+
+  chain-node-1:
+    build: { context: ./blockchain-node, dockerfile: Dockerfile }
+    container_name: sentinel-chain-1
+    depends_on: [chain-node-0]
+    environment:
+      - NODE_ID=node-1
+      - CHAIN_ID=31337
+      - SELF_URL=http://chain-node-1:30303
+      - VALIDATOR_COUNT=6
+      - VALIDATOR_INDICES=2,3
+      - VALIDATOR_SEED=${VALIDATOR_SEED:-sentinel-testnet}
+      - GENESIS_TIME=${GENESIS_TIME:-0}
+      - SLOT_SECONDS=${SLOT_SECONDS:-4}
+      - SLOTS_PER_EPOCH=8
+      - BOOTNODES=http://chain-node-0:30303
+      - LOG_LEVEL=INFO
+    ports:
+      - "127.0.0.1:8546:8545"
+    labels:
+      co.elastic.logs/enabled: "true"
+      app: "blockchain-node"
+    mem_limit: 256m
+
+  chain-node-2:
+    build: { context: ./blockchain-node, dockerfile: Dockerfile }
+    container_name: sentinel-chain-2
+    depends_on: [chain-node-0]
+    environment:
+      - NODE_ID=node-2
+      - CHAIN_ID=31337
+      - SELF_URL=http://chain-node-2:30303
+      - VALIDATOR_COUNT=6
+      - VALIDATOR_INDICES=4,5
+      - VALIDATOR_SEED=${VALIDATOR_SEED:-sentinel-testnet}
+      - GENESIS_TIME=${GENESIS_TIME:-0}
+      - SLOT_SECONDS=${SLOT_SECONDS:-4}
+      - SLOTS_PER_EPOCH=8
+      - BOOTNODES=http://chain-node-0:30303
+      - LOG_LEVEL=INFO
+    ports:
+      - "127.0.0.1:8548:8545"
+    labels:
+      co.elastic.logs/enabled: "true"
+      app: "blockchain-node"
+    mem_limit: 256m
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.13.4
+    container_name: sentinel-filebeat
+    user: root
+    depends_on:
+      logstash: { condition: service_healthy }
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./docker/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      # The container log files themselves, plus the Docker socket so
+      # autodiscover can map a log file back to the container that wrote it.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - fb-data:/usr/share/filebeat/data
+    mem_limit: 256m
+
+volumes:
+  es-data:
+  ls-data:
+  fb-data:

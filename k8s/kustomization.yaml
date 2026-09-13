@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: observability
+
+resources:
+  - base/00-namespace.yaml
+  - elasticsearch/statefulset.yaml
+  - logstash/configmap.yaml
+  - logstash/deployment.yaml
+  - kibana/deployment.yaml
+  - agent/configmap.yaml
+  - agent/daemonset.yaml
+  - demo-app/deployment.yaml
+  - blockchain/statefulset.yaml
+
+# Generate the Logstash pipeline ConfigMap from the same files the Compose
+# stack mounts directly, so local development and the cluster can never drift.
+configMapGenerator:
+  - name: logstash-pipeline
+    files:
+      - ../logstash/pipeline/10-input.conf
+      - ../logstash/pipeline/20-parse.conf
+      - ../logstash/pipeline/30-normalize.conf
+      - ../logstash/pipeline/40-enrich.conf
+      - ../logstash/pipeline/90-output.conf
+  - name: logstash-config
+    files:
+      - ../logstash/config/logstash.yml
+      - ../logstash/config/pipelines.yml
+      - ../logstash/config/threat_intel.yml
+
+# Name suffixes are hashes of the content, so any change to a pipeline file
+# produces a new ConfigMap name and rolls the Deployment automatically. This is
+# what actually solves the "edited the ConfigMap and nothing happened" problem
+# that the checksum annotation in the Deployment only papers over.
+generatorOptions:
+  disableNameSuffixHash: false
+
+commonLabels:
+  app.kubernetes.io/part-of: sentinel-platform
+  app.kubernetes.io/managed-by: kustomize

@@ -1,0 +1,44 @@
+# Logstash node settings.
+
+node.name: ${NODE_NAME:logstash}
+path.data: /usr/share/logstash/data
+
+# --- Pipeline tuning --------------------------------------------------------
+# workers defaults to the core count. We pin it so behaviour does not silently
+# change when the pod lands on a bigger node, which makes capacity numbers from
+# load tests actually mean something.
+pipeline.workers: ${PIPELINE_WORKERS:4}
+pipeline.batch.size: ${PIPELINE_BATCH_SIZE:250}
+pipeline.batch.delay: 50
+
+# Ordered execution is off: none of our filters depend on cross-event ordering,
+# and enforcing order would cap us at a single worker.
+pipeline.ordered: false
+
+# --- Durability -------------------------------------------------------------
+# Persistent queue, not the default in-memory one. With the memory queue a pod
+# eviction silently loses whatever was in flight; for security logs that is a
+# gap in the audit trail precisely when something is going wrong.
+queue.type: persisted
+queue.max_bytes: 2gb
+queue.checkpoint.writes: 1024
+
+# Events Elasticsearch rejects outright (mapping conflicts, malformed docs) go
+# here instead of being dropped, so they can be inspected and replayed.
+dead_letter_queue.enable: true
+dead_letter_queue.max_bytes: 512mb
+dead_letter_queue.storage_policy: drop_older
+dead_letter_queue.retain.age: 3d
+
+# --- Monitoring -------------------------------------------------------------
+api.http.host: 0.0.0.0
+api.http.port: 9600
+
+log.level: ${LOG_LEVEL:info}
+# Logstash's own logs as JSON, so the platform can ingest the platform.
+log.format: json
+
+# The config is mounted from a ConfigMap and changes are applied by rolling the
+# Deployment, so live reload is off - two mechanisms racing to apply the same
+# change is worse than one that is slightly slower.
+config.reload.automatic: false

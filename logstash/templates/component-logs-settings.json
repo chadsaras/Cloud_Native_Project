@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "description": "Index settings shared by every logs-* data stream",
+    "managed_by": "sentinel-platform"
+  },
+  "template": {
+    "settings": {
+      "index": {
+        "number_of_shards": "1",
+        "number_of_replicas": "1",
+
+        "refresh_interval": "10s",
+
+        "codec": "best_compression",
+
+        "sort.field": [ "@timestamp" ],
+        "sort.order": [ "desc" ],
+
+        "mapping": {
+          "total_fields": { "limit": "2000" },
+          "depth": { "limit": "20" },
+          "nested_fields": { "limit": "50" },
+          "ignore_malformed": true
+        },
+
+        "query": { "default_field": [ "message", "error.message" ] }
+      }
+    }
+  }
+}

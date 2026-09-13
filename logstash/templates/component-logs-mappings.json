@@ -1,0 +1,552 @@
+{
+  "_meta": {
+    "description": "Field mappings shared by every logs-* data stream on this platform",
+    "managed_by": "sentinel-platform",
+    "design_notes": {
+      "mappings": "dynamic:false is the single most important setting here. Logs contain attacker-controlled keys; with dynamic mapping on, one request carrying 5000 unique JSON keys creates 5000 fields and the cluster state grows until the master node falls over. Unmapped fields are still stored in _source and remain visible in the document, they are just not indexed.",
+      "mappings.properties.labels": "labels is the one place dynamic mapping is allowed, because it is where the application puts its own fields. Everything under it is mapped on first sight; keep it to low-cardinality values.",
+      "mappings.properties.blockchain": "ECS has no blockchain field definitions, so this namespace is a local extension. Field names mirror the concepts real consensus clients expose (slot, epoch, validator index, reorg depth, peer id) so that grok parsers for Lighthouse or Prysm output could target the same schema later. Every field here is queried by at least one BC-* detection rule; with dynamic:false an unmapped field is stored but not indexed, and a rule querying it would silently never fire."
+    }
+  },
+  "template": {
+    "mappings": {
+      "_source": {
+        "enabled": true
+      },
+      "dynamic": "false",
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "message": {
+          "type": "match_only_text"
+        },
+        "tags": {
+          "type": "keyword"
+        },
+        "ecs": {
+          "properties": {
+            "version": {
+              "type": "keyword"
+            }
+          }
+        },
+        "log": {
+          "properties": {
+            "level": {
+              "type": "keyword"
+            },
+            "logger": {
+              "type": "keyword"
+            },
+            "origin": {
+              "properties": {
+                "function": {
+                  "type": "keyword"
+                },
+                "file": {
+                  "properties": {
+                    "name": {
+                      "type": "keyword"
+                    },
+                    "line": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "service": {
+          "properties": {
+            "name": {
+              "type": "keyword"
+            },
+            "version": {
+              "type": "keyword"
+            },
+            "environment": {
+              "type": "keyword"
+            },
+            "node": {
+              "properties": {
+                "name": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "host": {
+          "properties": {
+            "hostname": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "ip": {
+              "type": "ip"
+            }
+          }
+        },
+        "orchestrator": {
+          "properties": {
+            "type": {
+              "type": "keyword"
+            },
+            "namespace": {
+              "type": "keyword"
+            },
+            "resource": {
+              "properties": {
+                "name": {
+                  "type": "keyword"
+                },
+                "parent": {
+                  "properties": {
+                    "name": {
+                      "type": "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "event": {
+          "properties": {
+            "kind": {
+              "type": "keyword"
+            },
+            "category": {
+              "type": "keyword"
+            },
+            "type": {
+              "type": "keyword"
+            },
+            "action": {
+              "type": "keyword"
+            },
+            "outcome": {
+              "type": "keyword"
+            },
+            "reason": {
+              "type": "keyword"
+            },
+            "dataset": {
+              "type": "keyword"
+            },
+            "module": {
+              "type": "keyword"
+            },
+            "severity": {
+              "type": "long"
+            },
+            "duration": {
+              "type": "long"
+            },
+            "created": {
+              "type": "date"
+            },
+            "ingested_lag_sec": {
+              "type": "float"
+            }
+          }
+        },
+        "user": {
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "domain": {
+              "type": "keyword"
+            },
+            "target": {
+              "properties": {
+                "name": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "source": {
+          "properties": {
+            "ip": {
+              "type": "ip"
+            },
+            "port": {
+              "type": "integer"
+            },
+            "ip_scope": {
+              "type": "keyword"
+            },
+            "geo": {
+              "properties": {
+                "city_name": {
+                  "type": "keyword"
+                },
+                "country_name": {
+                  "type": "keyword"
+                },
+                "country_code2": {
+                  "type": "keyword"
+                },
+                "continent_code": {
+                  "type": "keyword"
+                },
+                "region_name": {
+                  "type": "keyword"
+                },
+                "location": {
+                  "type": "geo_point"
+                }
+              }
+            },
+            "as": {
+              "properties": {
+                "number": {
+                  "type": "long"
+                },
+                "organization": {
+                  "properties": {
+                    "name": {
+                      "type": "keyword"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "destination": {
+          "properties": {
+            "ip": {
+              "type": "ip"
+            },
+            "port": {
+              "type": "integer"
+            }
+          }
+        },
+        "http": {
+          "properties": {
+            "version": {
+              "type": "keyword"
+            },
+            "request": {
+              "properties": {
+                "method": {
+                  "type": "keyword"
+                },
+                "referrer": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "response": {
+              "properties": {
+                "status_code": {
+                  "type": "integer"
+                },
+                "status_class": {
+                  "type": "keyword"
+                },
+                "body": {
+                  "properties": {
+                    "bytes": {
+                      "type": "long"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "url": {
+          "properties": {
+            "original": {
+              "type": "keyword",
+              "ignore_above": 2048
+            },
+            "path": {
+              "type": "keyword",
+              "ignore_above": 1024
+            },
+            "query": {
+              "type": "keyword",
+              "ignore_above": 2048
+            },
+            "domain": {
+              "type": "keyword"
+            }
+          }
+        },
+        "user_agent": {
+          "properties": {
+            "original": {
+              "type": "keyword",
+              "ignore_above": 1024
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "version": {
+              "type": "keyword"
+            },
+            "category": {
+              "type": "keyword"
+            },
+            "os": {
+              "properties": {
+                "name": {
+                  "type": "keyword"
+                },
+                "version": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "device": {
+              "properties": {
+                "name": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "rule": {
+          "properties": {
+            "id": {
+              "type": "keyword"
+            },
+            "name": {
+              "type": "keyword"
+            },
+            "category": {
+              "type": "keyword"
+            }
+          }
+        },
+        "threat": {
+          "properties": {
+            "indicator": {
+              "properties": {
+                "matched": {
+                  "type": "keyword"
+                },
+                "type": {
+                  "type": "keyword"
+                },
+                "provider": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "tactic": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                },
+                "name": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "technique": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                },
+                "name": {
+                  "type": "keyword"
+                }
+              }
+            }
+          }
+        },
+        "error": {
+          "properties": {
+            "type": {
+              "type": "keyword"
+            },
+            "message": {
+              "type": "match_only_text"
+            },
+            "stack_trace": {
+              "type": "text",
+              "index": false
+            }
+          }
+        },
+        "trace": {
+          "properties": {
+            "id": {
+              "type": "keyword"
+            }
+          }
+        },
+        "process": {
+          "properties": {
+            "pid": {
+              "type": "long"
+            }
+          }
+        },
+        "labels": {
+          "type": "object",
+          "dynamic": "true"
+        },
+        "blockchain": {
+          "properties": {
+            "node_id": {
+              "type": "keyword"
+            },
+            "chain_id": {
+              "type": "long"
+            },
+            "slot": {
+              "type": "long"
+            },
+            "epoch": {
+              "type": "long"
+            },
+            "block": {
+              "properties": {
+                "height": {
+                  "type": "long"
+                },
+                "hash": {
+                  "type": "keyword"
+                },
+                "parent_hash": {
+                  "type": "keyword"
+                },
+                "tx_count": {
+                  "type": "integer"
+                }
+              }
+            },
+            "validator": {
+              "properties": {
+                "index": {
+                  "type": "long"
+                },
+                "pubkey": {
+                  "type": "keyword"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              }
+            },
+            "slashing": {
+              "properties": {
+                "kind": {
+                  "type": "keyword"
+                },
+                "evidence": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "rpc": {
+              "properties": {
+                "method": {
+                  "type": "keyword"
+                },
+                "namespace": {
+                  "type": "keyword"
+                },
+                "block_range": {
+                  "type": "long"
+                },
+                "param_bytes": {
+                  "type": "long"
+                },
+                "request_count": {
+                  "type": "long"
+                },
+                "window_seconds": {
+                  "type": "integer"
+                }
+              }
+            },
+            "peer": {
+              "properties": {
+                "id": {
+                  "type": "keyword"
+                },
+                "count": {
+                  "type": "integer"
+                },
+                "churn_events": {
+                  "type": "integer"
+                }
+              }
+            },
+            "mempool": {
+              "properties": {
+                "size": {
+                  "type": "integer"
+                },
+                "flood_count": {
+                  "type": "integer"
+                }
+              }
+            },
+            "tx": {
+              "properties": {
+                "hash": {
+                  "type": "keyword"
+                },
+                "origin": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "reorg_depth": {
+              "type": "integer"
+            },
+            "previous_head": {
+              "type": "keyword"
+            },
+            "common_ancestor": {
+              "type": "keyword"
+            },
+            "fork_choice": {
+              "type": "keyword"
+            },
+            "rejection_reason": {
+              "type": "keyword"
+            },
+            "duty": {
+              "type": "keyword"
+            },
+            "participation": {
+              "type": "float"
+            },
+            "epochs_behind": {
+              "type": "integer"
+            },
+            "justified_height": {
+              "type": "long"
+            },
+            "finalized_height": {
+              "type": "long"
+            },
+            "genesis_time": {
+              "type": "long"
+            }
+          }
+        }
+      }
+    }
+  }
+}

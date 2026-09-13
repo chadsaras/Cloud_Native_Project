@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  consistency:
+    name: Platform consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+
+      # These need no cluster, so they run on every PR in seconds. They catch
+      # the failures that are otherwise invisible until a dashboard is empty:
+      # a rule querying an unmapped field, a security dataset silently falling
+      # through to 14-day retention, a lookback window that leaves a gap.
+      - name: secp256k1 matches published test vectors
+        run: python3 tests/test_crypto.py
+
+      - name: Rules, mappings and templates agree
+        run: python3 tests/test_platform_consistency.py
+
+      - name: Validate JSON
+        run: |
+          for f in $(find . -name '*.json' -not -path './.git/*'); do
+            python3 -c "import json,sys; json.load(open('$f'))" \
+              || { echo "invalid JSON: $f"; exit 1; }
+          done
+          echo "all JSON files valid"
+
+      - name: Validate YAML
+        run: |
+          pip install pyyaml
+          python3 - <<'PY'
+          import sys, glob, yaml
+          bad = []
+          for f in glob.glob('k8s/**/*.yaml', recursive=True) + ['docker-compose.yml']:
+              try:
+                  list(yaml.safe_load_all(open(f)))
+              except Exception as e:
+                  bad.append((f, e))
+          for f, e in bad:
+              print(f"invalid YAML: {f}: {e}")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Shell syntax
+        run: for s in scripts/*.sh; do bash -n "$s" || exit 1; done
+
+  detections:
+    name: Detection rules fire on their scenarios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r demo-app/requirements.txt
+
+      # Start the app, run every attack scenario against it, then replay the
+      # captured log through the rules. A rule that stops firing on its own
+      # scenario fails the build - which is the regression that matters most,
+      # because a broken detection is silent by nature.
+      - name: Run scenarios and evaluate rules
+        run: |
+          PYTHONPATH=demo-app PORT=8099 python3 -m app.main > /tmp/app.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8099/healthz >/dev/null && break
+            sleep 1
+          done
+          python3 scripts/traffic_generator.py --target http://localhost:8099 --scenario all
+          python3 scripts/traffic_generator.py --target http://localhost:8099 --duration 20 --rps 5
+          sleep 2
+          python3 tests/simulate_detections.py /tmp/app.log
+
+  blockchain:
+    name: Blockchain rules fire on their scenarios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r blockchain-node/requirements.txt
+
+      # Start a real 3-node testnet, run every attack scenario against it, and
+      # evaluate the rules on the capture. A detection that stops firing on its
+      # own scenario fails the build - which is the regression that matters
+      # most here, because a broken detection is silent by nature.
+      - name: Run testnet, attack it, evaluate rules
+        env:
+          SLOT_SECONDS: "2"
+          SLOTS_PER_EPOCH: "4"
+          VALIDATOR_COUNT: "6"
+        run: |
+          ./scripts/run-local-testnet.sh &
+          TESTNET_PID=$!
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8545/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8545/healthz || { echo "testnet failed to start"; exit 1; }
+
+          python3 scripts/blockchain_attacks.py --scenario all --target http://localhost:8545
+          sleep 3
+          python3 tests/simulate_detections.py testnet-logs/node-0.log
+          kill $TESTNET_PID 2>/dev/null || true
+
+      - name: Upload capture on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-logs
+          path: testnet-logs/
+
+  pipeline:
+    name: Logstash config parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate pipeline syntax
+        run: |
+          docker run --rm \
+            -v "$PWD/logstash/pipeline:/usr/share/logstash/pipeline:ro" \
+            -v "$PWD/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro" \
+            -v "$PWD/logstash/config/threat_intel.yml:/usr/share/logstash/config/threat_intel.yml:ro" \
+            -e LS_JAVA_OPTS="-Xms512m -Xmx512m" \
+            docker.elastic.co/logstash/logstash:8.13.4 \
+            logstash --config.test_and_exit \
+                     --path.settings /usr/share/logstash/config \
+                     -f '/usr/share/logstash/pipeline/*.conf'

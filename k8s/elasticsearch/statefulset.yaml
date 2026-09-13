@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: observability
+  labels: { app: elasticsearch }
+spec:
+  # Headless. Each pod gets a stable DNS name (elasticsearch-0.elasticsearch)
+  # which is what the discovery settings below resolve against. A normal
+  # ClusterIP Service load-balances, which breaks cluster formation.
+  clusterIP: None
+  selector: { app: elasticsearch }
+  ports:
+    - { name: http,      port: 9200 }
+    - { name: transport, port: 9300 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-client
+  namespace: observability
+  labels: { app: elasticsearch }
+spec:
+  # Load-balanced endpoint for clients (Logstash, Kibana). Separate from the
+  # headless Service so client traffic and cluster formation do not share a
+  # resolution path.
+  type: ClusterIP
+  selector: { app: elasticsearch }
+  ports:
+    - { name: http, port: 9200, targetPort: 9200 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: observability
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  # 3 nodes, not 1 and not 2. Elasticsearch elects a master by quorum, which is
+  # (n/2)+1. With 2 nodes the quorum is 2, so losing either node makes the
+  # cluster unavailable - strictly worse than a single node. 3 is the smallest
+  # count that tolerates one failure.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: { app: elasticsearch }
+  template:
+    metadata:
+      labels: { app: elasticsearch }
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # fsGroup makes the kubelet chown the mounted volume to this gid, which
+        # is what lets a non-root Elasticsearch write to its data directory.
+
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            # Hard, not preferred. Two Elasticsearch nodes on one host means a
+            # single host failure can break quorum, which defeats the point of
+            # running three.
+            - labelSelector:
+                matchLabels: { app: elasticsearch }
+              topologyKey: kubernetes.io/hostname
+
+      initContainers:
+        - name: sysctl
+          image: busybox:1.36
+          # Elasticsearch's memory-mapped directory implementation needs more
+          # map areas than the Linux default of 65530. Below this it fails at
+          # startup with a bootstrap check error. This is a node-level sysctl
+          # and is the one place this deployment needs privilege.
+          command: ["sh", "-c", "sysctl -w vm.max_map_count=262144"]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits:   { cpu: 50m, memory: 32Mi }
+
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+          ports:
+            - { name: http,      containerPort: 9200 }
+            - { name: transport, containerPort: 9300 }
+          env:
+            - name: node.name
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: cluster.name
+              value: sentinel-logs
+            - name: discovery.seed_hosts
+              value: "elasticsearch-0.elasticsearch,elasticsearch-1.elasticsearch,elasticsearch-2.elasticsearch"
+            - name: cluster.initial_master_nodes
+              value: "elasticsearch-0,elasticsearch-1,elasticsearch-2"
+              # Only consulted on the very first boot of a brand new cluster.
+              # Leaving it set afterwards is harmless; removing it from a
+              # running cluster is also fine. Setting it wrong on first boot
+              # can form two independent clusters, which is unrecoverable
+              # without deleting data.
+            - name: ES_JAVA_OPTS
+              value: "-Xms2g -Xmx2g"
+              # Half the 4Gi limit. The other half is for Lucene's off-heap
+              # file cache, which is what actually makes searches fast - giving
+              # the heap everything makes Elasticsearch slower, not faster.
+            - name: bootstrap.memory_lock
+              value: "false"
+              # Would be true with a memlock ulimit. In many managed clusters
+              # the container runtime does not grant it, and Elasticsearch
+              # refuses to start if locking is requested and fails. Disabled
+              # here with the trade acknowledged: set to true on nodes where
+              # swap is off and memlock is available.
+            - name: xpack.security.enabled
+              value: "true"
+            - name: xpack.security.transport.ssl.enabled
+              value: "true"
+            - name: xpack.security.transport.ssl.verification_mode
+              value: certificate
+            - name: xpack.security.transport.ssl.key
+              value: /usr/share/elasticsearch/config/certs/tls.key
+            - name: xpack.security.transport.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/tls.crt
+            - name: xpack.security.transport.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: xpack.security.http.ssl.enabled
+              value: "true"
+            - name: xpack.security.http.ssl.key
+              value: /usr/share/elasticsearch/config/certs/tls.key
+            - name: xpack.security.http.ssl.certificate
+              value: /usr/share/elasticsearch/config/certs/tls.crt
+            - name: xpack.security.http.ssl.certificate_authorities
+              value: /usr/share/elasticsearch/config/certs/ca.crt
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: elastic-credentials, key: password }
+
+          resources:
+            requests: { cpu: "1",  memory: 4Gi }
+            limits:   { cpu: "2",  memory: 4Gi }
+            # Memory request == limit puts the pod in the Guaranteed QoS class,
+            # so the kubelet will not evict it under node pressure. A database
+            # that gets evicted mid-write is how shards get corrupted.
+
+          volumeMounts:
+            - { name: data,  mountPath: /usr/share/elasticsearch/data }
+            - { name: certs, mountPath: /usr/share/elasticsearch/config/certs, readOnly: true }
+
+          startupProbe:
+            # Generous: a node replaying a large translog after an unclean
+            # shutdown can take minutes. Without a startupProbe the liveness
+            # probe would kill it mid-recovery, and it would never finish.
+            httpGet: { path: "/_cluster/health?local=true", port: 9200, scheme: HTTPS }
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: 9200, scheme: HTTPS }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 9300 }
+            # Deliberately a TCP check on the transport port, not an HTTP
+            # health check. A node under heavy GC can fail an HTTP probe while
+            # being perfectly recoverable; restarting it makes things worse.
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 5
+
+      volumes:
+        - name: certs
+          secret: { secretName: elasticsearch-certs }
+
+      terminationGracePeriodSeconds: 120
+      # Long enough for the node to flush and hand off shards cleanly.
+
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 50Gi } }

@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elastic-agent-config
+  namespace: observability
+data:
+  agent.yml: |
+    # Standalone-mode Elastic Agent. Fleet-managed is the usual production
+    # choice, but standalone keeps the configuration in git where it can be
+    # reviewed, which is the same argument as detections-as-code.
+
+    inputs:
+      - type: filestream
+        id: container-logs
+        use_output: logstash
+        streams:
+          - id: kubernetes-container-logs
+            data_stream:
+              dataset: kubernetes.container_logs
+            paths:
+              - /var/log/containers/*.log
+            # Exclude the observability stack's own containers. Without this,
+            # Elasticsearch logs a slow query, the agent collects it, Logstash
+            # indexes it, which makes Elasticsearch log more - a feedback loop
+            # that is genuinely hard to spot because it looks like real load.
+            exclude_files:
+              - '.*elasticsearch.*\.log$'
+              - '.*kibana.*\.log$'
+              - '.*logstash.*\.log$'
+              - '.*elastic-agent.*\.log$'
+
+            parsers:
+              # CRI log lines are "<timestamp> <stream> <flag> <message>".
+              # This unwraps them so [message] holds the application's actual
+              # output, which is what the parse stage in Logstash expects.
+              - container:
+                  stream: all
+                  format: auto
+              # Reassemble stack traces spread over many lines into one event.
+              - multiline:
+                  type: pattern
+                  pattern: '^[[:space:]]+(at|\.{3})[[:space:]]|^Caused by:|^Traceback|^[[:space:]]+File "'
+                  negate: false
+                  match: after
+                  max_lines: 100
+                  timeout: 5s
+
+            prospector.scanner.symlinks: true
+            # /var/log/containers is entirely symlinks into /var/log/pods.
+            # Without this the agent finds nothing at all and reports no error.
+
+    processors:
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          # Turn the file path into pod, namespace, node and label metadata.
+          matchers:
+            - logs_path:
+                logs_path: /var/log/containers/
+      - add_host_metadata: ~
+      - add_cloud_metadata: ~
+      - drop_fields:
+          fields: ["agent.ephemeral_id", "ecs.version"]
+          ignore_missing: true
+
+    outputs:
+      logstash:
+        type: logstash
+        hosts: ["logstash:5044"]
+        loadbalance: true
+        bulk_max_size: 512
+
+    agent:
+      logging:
+        level: info
+        to_stderr: true

@@ -1,0 +1,14 @@
+# Internal threat intelligence feed - IP indicator -> reason.
+#
+# Refreshed by Logstash every 300s (see the translate filter in 40-enrich.conf),
+# so this file can be updated by a ConfigMap change without a pipeline restart.
+#
+# Every address here is from RFC 5737 documentation space (192.0.2.0/24,
+# 198.51.100.0/24, 203.0.113.0/24). Those ranges are reserved for examples and
+# are not routable, so nothing in this file can ever point at a real host.
+# A production feed would be generated from MISP or a commercial provider.
+"192.0.2.66":  "scanner.known-bruteforce"
+"192.0.2.131": "scanner.credential-stuffing"
+"192.0.2.207": "scanner.web-vuln-scan"
+"192.0.2.44":  "scanner.endpoint-enumeration"
+"192.0.2.99":  "c2.suspected-exfil-node"

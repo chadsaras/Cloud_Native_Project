@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: observability
+  labels: { app: logstash }
+spec:
+  selector: { app: logstash }
+  ports:
+    - { name: beats,      port: 5044, targetPort: 5044 }
+    - { name: monitoring, port: 9600, targetPort: 9600 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: logstash
+  namespace: observability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: logstash }
+  # Without this, a node drain can take every Logstash replica down at once and
+  # the whole pipeline stops. Agents buffer for a while, but not forever.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: observability
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+      # maxUnavailable 0 keeps full ingest capacity during a rollout. Logstash
+      # takes 40-60s to start a pipeline, so allowing one to go down first
+      # would mean a minute at half capacity on every config change.
+  selector:
+    matchLabels: { app: logstash }
+  template:
+    metadata:
+      labels: { app: logstash }
+      annotations:
+        # Roll the pods automatically when the pipeline config changes.
+        # Without this, a ConfigMap edit updates the mounted file but nothing
+        # reloads, and the change silently does not take effect.
+        checksum/pipeline: "REPLACED_BY_KUSTOMIZE_OR_CI"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:8.13.4
+          ports:
+            - { name: beats,      containerPort: 5044 }
+            - { name: monitoring, containerPort: 9600 }
+          env:
+            - name: NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: ELASTICSEARCH_HOSTS
+              value: "https://elasticsearch-client:9200"
+            - name: ELASTIC_USER
+              value: "elastic"
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: elastic-credentials, key: password }
+            - name: PIPELINE_WORKERS
+              value: "4"
+            - name: PIPELINE_BATCH_SIZE
+              value: "250"
+            - name: LS_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+          resources:
+            requests: { cpu: "1",   memory: 2Gi }
+            limits:   { cpu: "2",   memory: 2Gi }
+          volumeMounts:
+            - { name: pipeline, mountPath: /usr/share/logstash/pipeline }
+            - { name: config,   mountPath: /usr/share/logstash/config/logstash.yml,     subPath: logstash.yml }
+            - { name: config,   mountPath: /usr/share/logstash/config/pipelines.yml,    subPath: pipelines.yml }
+            - { name: config,   mountPath: /usr/share/logstash/config/threat_intel.yml, subPath: threat_intel.yml }
+            - { name: certs,    mountPath: /usr/share/logstash/config/certs, readOnly: true }
+            - { name: data,     mountPath: /usr/share/logstash/data }
+          startupProbe:
+            httpGet: { path: "/_node/pipelines/main", port: 9600 }
+            failureThreshold: 20
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: "/_node/pipelines/main", port: 9600 }
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: "/", port: 9600 }
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 4
+      volumes:
+        - name: pipeline
+          configMap: { name: logstash-pipeline }
+        - name: config
+          configMap: { name: logstash-config }
+        - name: certs
+          secret: { secretName: elasticsearch-certs }
+        - name: data
+          emptyDir: { sizeLimit: 4Gi }
+          # Note: the persistent queue lives here, so it does NOT survive a
+          # pod restart. Making this a PVC via a StatefulSet is the correct
+          # production choice; it is an emptyDir here to keep the manifest set
+          # deployable on a cluster with no dynamic provisioner. The trade is
+          # written up in docs/roadmap.md.
+      terminationGracePeriodSeconds: 60
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logstash-policy
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels: { app: logstash }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # Only the agents may push events in.
+    - from:
+        - podSelector:
+            matchLabels: { app: elastic-agent }
+      ports:
+        - { port: 5044, protocol: TCP }
+    # Prometheus-style scrape of the monitoring API.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { port: 9600, protocol: TCP }
+  egress:
+    # Out to Elasticsearch only. Logstash has no reason to reach anything else,
+    # and a pipeline that can make arbitrary outbound calls is a data
+    # exfiltration path that runs with credentials to the whole log estate.
+    - to:
+        - podSelector:
+            matchLabels: { app: elasticsearch }
+      ports:
+        - { port: 9200, protocol: TCP }

@@ -1,0 +1,114 @@
+{
+  "logs-security-retention": {
+    "_meta": {
+      "description": "90 day retention for security-relevant datasets (auth, iam, waf, intrusion detection). Longer than operational logs because incident investigation routinely looks back a quarter, and because a breach is often discovered long after it started.",
+      "cold_phase_note": "Cold phase drops to zero replicas rather than using the freeze action, which is deprecated in ES 8 and removed in 9. Zero replicas halves the disk cost of 30-90 day data; the trade is that a node loss in that window means restoring from snapshot. Acceptable for data that is read during investigations rather than served to dashboards. A production cluster with a snapshot repository configured would use searchable_snapshot here instead, which is strictly better but needs object storage."
+    },
+    "policy": {
+      "phases": {
+        "hot": {
+          "actions": {
+            "rollover": {
+              "max_primary_shard_size": "30gb",
+              "max_age": "1d"
+            },
+            "set_priority": {
+              "priority": 100
+            }
+          }
+        },
+        "warm": {
+          "min_age": "7d",
+          "actions": {
+            "forcemerge": {
+              "max_num_segments": 1
+            },
+            "shrink": {
+              "number_of_shards": 1
+            },
+            "set_priority": {
+              "priority": 50
+            }
+          }
+        },
+        "cold": {
+          "min_age": "30d",
+          "actions": {
+            "set_priority": {
+              "priority": 0
+            },
+            "allocate": {
+              "number_of_replicas": 0
+            }
+          }
+        },
+        "delete": {
+          "min_age": "90d",
+          "actions": {
+            "delete": {}
+          }
+        }
+      }
+    }
+  },
+  "logs-operational-retention": {
+    "_meta": {
+      "description": "14 day retention for high-volume operational logs (nginx access, app info). This is the bulk of the byte volume and the least valuable per byte."
+    },
+    "policy": {
+      "phases": {
+        "hot": {
+          "actions": {
+            "rollover": {
+              "max_primary_shard_size": "50gb",
+              "max_age": "1d"
+            },
+            "set_priority": {
+              "priority": 100
+            }
+          }
+        },
+        "warm": {
+          "min_age": "3d",
+          "actions": {
+            "forcemerge": {
+              "max_num_segments": 1
+            },
+            "set_priority": {
+              "priority": 50
+            }
+          }
+        },
+        "delete": {
+          "min_age": "14d",
+          "actions": {
+            "delete": {}
+          }
+        }
+      }
+    }
+  },
+  "logs-unparsed-retention": {
+    "_meta": {
+      "description": "3 day retention for events no parser matched. Short on purpose: this stream exists to be alerted on and fixed, not to be stored. A growing count here is a broken parser, and the fix is a pipeline change, not more disk."
+    },
+    "policy": {
+      "phases": {
+        "hot": {
+          "actions": {
+            "rollover": {
+              "max_age": "1d",
+              "max_primary_shard_size": "10gb"
+            }
+          }
+        },
+        "delete": {
+          "min_age": "3d",
+          "actions": {
+            "delete": {}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# Single pipeline assembled from every *.conf in the pipeline directory.
+#
+# The stages are split across files for reviewability but they are one runtime
+# pipeline; Logstash concatenates them in alphabetical order, which is why each
+# file carries a numeric prefix.
+- pipeline.id: main
+  path.config: "/usr/share/logstash/pipeline/*.conf"
+  pipeline.workers: ${PIPELINE_WORKERS:4}
+  queue.type: persisted
