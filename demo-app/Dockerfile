@@ -8,8 +8,7 @@ WORKDIR /app
 
 # Dependencies in their own layer so a source change does not reinstall them.
 COPY requirements.txt .
-COPY wheels /wheels
-RUN pip install --no-index --find-links=/wheels -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 

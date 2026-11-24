@@ -4,8 +4,7 @@ RUN groupadd --gid 10002 chain && useradd --uid 10002 --gid chain --no-create-ho
 
 WORKDIR /app
 COPY requirements.txt .
-COPY wheels /wheels
-RUN pip install --no-index --find-links=/wheels -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY node/ ./node/
 
 ENV PYTHONUNBUFFERED=1 \
