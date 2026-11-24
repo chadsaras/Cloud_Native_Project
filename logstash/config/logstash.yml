@@ -1,14 +1,14 @@
 # Logstash node settings.
 
-node.name: ${NODE_NAME:logstash}
+node.name: ${SENTINEL_NODE_NAME:logstash}
 path.data: /usr/share/logstash/data
 
 # --- Pipeline tuning --------------------------------------------------------
 # workers defaults to the core count. We pin it so behaviour does not silently
 # change when the pod lands on a bigger node, which makes capacity numbers from
 # load tests actually mean something.
-pipeline.workers: ${PIPELINE_WORKERS:4}
-pipeline.batch.size: ${PIPELINE_BATCH_SIZE:250}
+pipeline.workers: ${SENTINEL_PIPELINE_WORKERS:4}
+pipeline.batch.size: ${SENTINEL_PIPELINE_BATCH_SIZE:250}
 pipeline.batch.delay: 50
 
 # Ordered execution is off: none of our filters depend on cross-event ordering,
@@ -34,7 +34,7 @@ dead_letter_queue.retain.age: 3d
 api.http.host: 0.0.0.0
 api.http.port: 9600
 
-log.level: ${LOG_LEVEL:info}
+log.level: ${SENTINEL_LOG_LEVEL:info}
 # Logstash's own logs as JSON, so the platform can ingest the platform.
 log.format: json
 

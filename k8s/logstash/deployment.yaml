@@ -59,7 +59,7 @@ spec:
             - { name: beats,      containerPort: 5044 }
             - { name: monitoring, containerPort: 9600 }
           env:
-            - name: NODE_NAME
+            - name: SENTINEL_NODE_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: ELASTICSEARCH_HOSTS
               value: "https://elasticsearch-client:9200"
@@ -68,9 +68,9 @@ spec:
             - name: ELASTIC_PASSWORD
               valueFrom:
                 secretKeyRef: { name: elastic-credentials, key: password }
-            - name: PIPELINE_WORKERS
+            - name: SENTINEL_PIPELINE_WORKERS
               value: "4"
-            - name: PIPELINE_BATCH_SIZE
+            - name: SENTINEL_PIPELINE_BATCH_SIZE
               value: "250"
             - name: LS_JAVA_OPTS
               value: "-Xms1g -Xmx1g"

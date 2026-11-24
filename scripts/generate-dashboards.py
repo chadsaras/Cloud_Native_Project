@@ -282,6 +282,14 @@ objects.append(dashboard(
     "reorganisations, and missed validator duties.",
     panels_chain))
 
+# Stamp the schema version each object was written for. Without these Kibana
+# replays every Lens migration from the first release and crashes (HTTP 500) on
+# the modern datasourceStates.formBased this generator emits.
+_TYPE_VERSION = {"index-pattern": "8.0.0", "lens": "8.9.0", "dashboard": "8.9.0"}
+for obj in objects:
+    obj["coreMigrationVersion"] = "8.8.0"
+    obj["typeMigrationVersion"] = _TYPE_VERSION[obj["type"]]
+
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with open(OUT, "w") as fh:
     for obj in objects:

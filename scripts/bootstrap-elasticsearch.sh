@@ -51,10 +51,10 @@ done
 
 echo
 echo "Installing component templates..."
-check "component/logs-mappings" \
-  "$(curl_es PUT "/_component_template/logs-mappings" "$(jq -c . "$HERE/logstash/templates/component-logs-mappings.json")")"
-check "component/logs-settings" \
-  "$(curl_es PUT "/_component_template/logs-settings" "$(jq -c . "$HERE/logstash/templates/component-logs-settings.json")")"
+check "component/sentinel-logs-mappings" \
+  "$(curl_es PUT "/_component_template/sentinel-logs-mappings" "$(jq -c . "$HERE/logstash/templates/component-logs-mappings.json")")"
+check "component/sentinel-logs-settings" \
+  "$(curl_es PUT "/_component_template/sentinel-logs-settings" "$(jq -c . "$HERE/logstash/templates/component-logs-settings.json")")"
 
 echo
 echo "Installing index templates..."
@@ -64,7 +64,7 @@ check "template/logs-security" "$(curl_es PUT "/_index_template/logs-security" '
   "index_patterns": ["logs-app.auth-*","logs-app.iam-*","logs-app.waf-*","logs-app.data-*","logs-blockchain.consensus-*","logs-blockchain.rpc-*","logs-blockchain.p2p-*"],
   "data_stream": {},
   "priority": 500,
-  "composed_of": ["logs-mappings","logs-settings"],
+  "composed_of": ["sentinel-logs-mappings","sentinel-logs-settings"],
   "template": { "settings": { "index.lifecycle.name": "logs-security-retention" } },
   "_meta": { "managed_by": "sentinel-platform", "retention": "90d" }
 }')"
@@ -74,7 +74,7 @@ check "template/logs-operational" "$(curl_es PUT "/_index_template/logs-operatio
   "index_patterns": ["logs-nginx.access-*","logs-app.checkout-*","logs-app.performance-*","logs-kubernetes.*","logs-blockchain.mempool-*"],
   "data_stream": {},
   "priority": 400,
-  "composed_of": ["logs-mappings","logs-settings"],
+  "composed_of": ["sentinel-logs-mappings","sentinel-logs-settings"],
   "template": { "settings": { "index.lifecycle.name": "logs-operational-retention" } },
   "_meta": { "managed_by": "sentinel-platform", "retention": "14d" }
 }')"
@@ -84,7 +84,7 @@ check "template/logs-unparsed" "$(curl_es PUT "/_index_template/logs-unparsed" '
   "index_patterns": ["logs-platform.unparsed-*"],
   "data_stream": {},
   "priority": 600,
-  "composed_of": ["logs-mappings","logs-settings"],
+  "composed_of": ["sentinel-logs-mappings","sentinel-logs-settings"],
   "template": { "settings": { "index.lifecycle.name": "logs-unparsed-retention" } },
   "_meta": { "managed_by": "sentinel-platform", "retention": "3d" }
 }')"
@@ -94,8 +94,8 @@ check "template/logs-unparsed" "$(curl_es PUT "/_index_template/logs-unparsed" '
 check "template/logs-catchall" "$(curl_es PUT "/_index_template/logs-catchall" '{
   "index_patterns": ["logs-*"],
   "data_stream": {},
-  "priority": 100,
-  "composed_of": ["logs-mappings","logs-settings"],
+  "priority": 101,
+  "composed_of": ["sentinel-logs-mappings","sentinel-logs-settings"],
   "template": { "settings": { "index.lifecycle.name": "logs-operational-retention" } },
   "_meta": { "managed_by": "sentinel-platform", "note": "fallback for unanticipated datasets" }
 }')"

@@ -111,13 +111,14 @@ services:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme-local-only}
-      - PIPELINE_WORKERS=2
-      - LOG_LEVEL=info
+      - SENTINEL_PIPELINE_WORKERS=2
+      - SENTINEL_LOG_LEVEL=info
       - LS_JAVA_OPTS=-Xms512m -Xmx512m
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
       - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
       - ./logstash/config/threat_intel.yml:/usr/share/logstash/config/threat_intel.yml:ro
+      - /dev/null:/usr/share/logstash/config/certs/ca.crt:ro   # Compose ES is plain HTTP; path must exist, content is unused
       - ls-data:/usr/share/logstash/data
     ports:
       - "127.0.0.1:5044:5044"   # beats
