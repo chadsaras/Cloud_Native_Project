@@ -104,8 +104,9 @@ notification sound is the fastest way to train people to ignore the channel.
 
 ## 7. Detection coverage is narrow by design
 
-Nine rules covering credential attacks, web exploitation, privilege escalation,
-exfiltration and pipeline health. Obvious gaps, roughly in priority order:
+Seventeen rules (nine web/pipeline, eight blockchain) covering credential attacks,
+web exploitation, privilege escalation, exfiltration, pipeline health and node
+abuse. Obvious gaps, roughly in priority order:
 
 - **Impossible travel** — successful logins from geographically distant
   locations within an implausible interval. The geo enrichment needed for it

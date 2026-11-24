@@ -259,10 +259,11 @@ def checkout():
     return jsonify({"status": "confirmed", "amount": amount}), 200
 
 
+log.info(
+    "payments-api starting",
+    extra={"ecs": {"event": {"kind": "event", "dataset": "app.lifecycle", "category": ["process"],
+                             "type": ["start"], "action": "service_start"}}},
+)
+
 if __name__ == "__main__":
-    log.info(
-        "payments-api starting",
-        extra={"ecs": {"event": {"kind": "event", "category": ["process"],
-                                 "type": ["start"], "action": "service_start"}}},
-    )
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))

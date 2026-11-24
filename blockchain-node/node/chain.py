@@ -288,7 +288,7 @@ class Blockchain:
 
         The return value distinguishes an ordinary extension from a
         reorganisation, and reports the reorg depth -- which is the number the
-        detection rule BC-004 thresholds on.
+        detection rule BC-003 thresholds on.
         """
         block_hash = block.hash()
         if block_hash in self.blocks:

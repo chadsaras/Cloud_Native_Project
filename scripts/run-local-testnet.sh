@@ -24,7 +24,10 @@ NODE_DIR="$HERE/blockchain-node"
 # afternoon.
 GENESIS_TIME="${GENESIS_TIME:-$(date +%s)}"
 
+# Resolve to an absolute path so a relative or absolute LOG_DIR both work
+# (the nodes are started from a different directory).
 mkdir -p "$LOG_DIR"
+LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 rm -f "$LOG_DIR"/*.log
 
 echo "Starting $NODES nodes, $VALIDATORS validators, ${SLOT_SECONDS}s slots"
@@ -65,7 +68,7 @@ for i in $(seq 0 $(( NODES - 1 ))); do
     SLOTS_PER_EPOCH="$SLOTS_PER_EPOCH" \
     BOOTNODES="$boot" \
     LOG_LEVEL="${LOG_LEVEL:-INFO}" \
-    python3 -m node.main > "$HERE/$LOG_DIR/node-$i.log" 2>&1 ) &
+    python3 -m node.main > "$LOG_DIR/node-$i.log" 2>&1 ) &
 
   pids+=($!)
   echo "  node-$i  validators=[$indices]  rpc=:$rpc_port  p2p=:$p2p_port"
