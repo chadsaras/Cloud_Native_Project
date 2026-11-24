@@ -7,28 +7,32 @@
 filebeat.autodiscover:
   providers:
     - type: docker
-      # Only collect from containers that opted in with the label. Collecting
-      # everything means collecting Elasticsearch's own logs, which then get
-      # indexed into Elasticsearch, which produces more logs - a feedback loop
-      # that is genuinely hard to diagnose once it starts.
-      templates:
-        - condition:
-            contains:
-              docker.container.labels.co_elastic_logs/enabled: "true"
-          config:
-            - type: container
-              paths:
-                - /var/lib/docker/containers/${data.docker.container.id}/*.log
-              # Stack traces arrive as many lines but are one event. Without
-              # this, a single Python traceback becomes 15 disconnected
-              # documents and the error is unsearchable.
-              multiline:
-                type: pattern
-                pattern: '^[[:space:]]+(at|\.{3})[[:space:]]|^Caused by:|^Traceback|^[[:space:]]+File "'
-                negate: false
-                match: after
-                max_lines: 100
-                timeout: 5s
+      # Hint-based: a container is collected only if it carries the label
+      # co.elastic.logs/enabled: "true". Collecting everything means collecting
+      # Elasticsearch's own logs, which then get indexed into Elasticsearch,
+      # which produces more logs - a feedback loop that is genuinely hard to
+      # diagnose once it starts.
+      #
+      # Hints are used instead of a `contains` condition on
+      # docker.container.labels.* because the field name Filebeat gives a label
+      # containing dots and a slash is easy to get wrong, and a condition that
+      # never matches fails silently (autodiscover runs, zero inputs start).
+      hints.enabled: true
+      hints.default_config:
+        enabled: false          # opt-in only; the label above turns it on
+        type: container
+        paths:
+          - /var/lib/docker/containers/${data.container.id}/*.log
+        # Stack traces arrive as many lines but are one event. Without this, a
+        # single Python traceback becomes 15 disconnected documents and the
+        # error is unsearchable.
+        multiline:
+          type: pattern
+          pattern: '^[[:space:]]+(at|\.{3})[[:space:]]|^Caused by:|^Traceback|^[[:space:]]+File "'
+          negate: false
+          match: after
+          max_lines: 100
+          timeout: 5s
 
 processors:
   # Attach container name, image and labels to every event.

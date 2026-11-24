@@ -23,6 +23,7 @@ configMapGenerator:
       - ../logstash/pipeline/20-parse.conf
       - ../logstash/pipeline/30-normalize.conf
       - ../logstash/pipeline/40-enrich.conf
+      - ../logstash/pipeline/80-route.conf
       - ../logstash/pipeline/90-output.conf
   - name: logstash-config
     files:

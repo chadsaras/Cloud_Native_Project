@@ -56,7 +56,15 @@ for rid in "${rule_ids[@]}"; do
       enabled:      true,
       tags:         (["sentinel-platform"] + [(.rule_id | split("-")[0])]),
       false_positives: (.false_positives // []),
-      threat:       (.threat // []),
+      # Kibana requires a reference URL on every tactic/technique/subtechnique;
+      # they are fully determined by the ids, so derive rather than store them.
+      threat:       ((.threat // []) | map(
+                       .tactic.reference = "https://attack.mitre.org/tactics/\(.tactic.id)/"
+                       | .technique |= map(
+                           .reference = "https://attack.mitre.org/techniques/\(.id)/"
+                           | if .subtechnique then .subtechnique |= map(
+                               .reference = "https://attack.mitre.org/techniques/\(.id | sub("\\."; "/"))/")
+                             else . end))),
       note:         ((.investigation_steps // []) | to_entries | map("\(.key+1). \(.value)") | join("\n"))
     }
     + (if .threshold then {threshold: .threshold} else {} end)
@@ -64,12 +72,19 @@ for rid in "${rule_ids[@]}"; do
 
   name=$(jq -r --arg rid "$rid" '.rules[] | select(.rule_id==$rid) | .name' "$RULES")
 
-  # PUT upserts by rule_id. POST would fail with a 409 on the second run.
-  resp=$(curl -sS -u "$AUTH" -X PUT "${KB}/api/detection_engine/rules" \
-           -H 'Content-Type: application/json' \
-           -H 'kbn-xsrf: true' \
-           -d "$payload" -w '\n%{http_code}')
+  # Kibana has no upsert: POST creates (409 if the rule_id exists) and PUT only
+  # updates (404 if it does not). Create first, fall back to update on 409.
+  send() {
+    curl -sS -u "$AUTH" -X "$1" "${KB}/api/detection_engine/rules" \
+      -H 'Content-Type: application/json' -H 'kbn-xsrf: true' \
+      -d "$payload" -w '\n%{http_code}'
+  }
+  resp=$(send POST)
   code=$(tail -n1 <<<"$resp")
+  if [[ "$code" == "409" ]]; then
+    resp=$(send PUT)
+    code=$(tail -n1 <<<"$resp")
+  fi
   body=$(sed '$d' <<<"$resp")
 
   if [[ "$code" =~ ^2 ]]; then

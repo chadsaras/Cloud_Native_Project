@@ -111,8 +111,8 @@ services:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-changeme-local-only}
-      - PIPELINE_WORKERS=2
-      - LOG_LEVEL=info
+      - SENTINEL_PIPELINE_WORKERS=2
+      - SENTINEL_LOG_LEVEL=info
       - LS_JAVA_OPTS=-Xms512m -Xmx512m
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
