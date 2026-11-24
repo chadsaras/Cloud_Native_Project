@@ -8,17 +8,24 @@ filebeat.autodiscover:
   providers:
     - type: docker
       # Hint-based: a container is collected only if it carries the label
-      # co.elastic.logs/enabled: "true" (keeps Elasticsearch's own logs out,
-      # which would otherwise create a feedback loop). Hints are used instead of
-      # a `contains` condition on docker.container.labels.* because that
-      # condition never matched here and failed silently.
+      # co.elastic.logs/enabled: "true". Collecting everything means collecting
+      # Elasticsearch's own logs, which then get indexed into Elasticsearch,
+      # which produces more logs - a feedback loop that is genuinely hard to
+      # diagnose once it starts.
+      #
+      # Hints are used instead of a `contains` condition on
+      # docker.container.labels.* because the field name Filebeat gives a label
+      # containing dots and a slash is easy to get wrong, and a condition that
+      # never matches fails silently (autodiscover runs, zero inputs start).
       hints.enabled: true
       hints.default_config:
         enabled: false          # opt-in only; the label above turns it on
         type: container
         paths:
           - /var/lib/docker/containers/${data.container.id}/*.log
-        # One Python traceback = one event, not 15 documents.
+        # Stack traces arrive as many lines but are one event. Without this, a
+        # single Python traceback becomes 15 disconnected documents and the
+        # error is unsearchable.
         multiline:
           type: pattern
           pattern: '^[[:space:]]+(at|\.{3})[[:space:]]|^Caused by:|^Traceback|^[[:space:]]+File "'

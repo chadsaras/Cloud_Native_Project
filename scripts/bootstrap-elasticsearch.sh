@@ -51,6 +51,10 @@ done
 
 echo
 echo "Installing component templates..."
+# Named sentinel-* on purpose: Elasticsearch ships built-in component templates
+# called logs-mappings / logs-settings and its template registry silently
+# reinstalls them, so templates composed of those names got ES's generic
+# dynamic mappings (source.ip as text) instead of ours.
 check "component/sentinel-logs-mappings" \
   "$(curl_es PUT "/_component_template/sentinel-logs-mappings" "$(jq -c . "$HERE/logstash/templates/component-logs-mappings.json")")"
 check "component/sentinel-logs-settings" \
@@ -90,7 +94,9 @@ check "template/logs-unparsed" "$(curl_es PUT "/_index_template/logs-unparsed" '
 }')"
 
 # Catch-all so a new dataset never lands with dynamic mapping enabled. Lowest
-# priority, so any specific template above beats it.
+# of OUR priorities, so any specific template above beats it. It must be 101,
+# not 100: Elasticsearch 8.x ships a built-in "logs" template (logs-*-*) at 100,
+# and two overlapping templates may not share a priority.
 check "template/logs-catchall" "$(curl_es PUT "/_index_template/logs-catchall" '{
   "index_patterns": ["logs-*"],
   "data_stream": {},
